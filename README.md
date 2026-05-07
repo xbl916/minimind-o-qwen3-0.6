@@ -624,6 +624,8 @@ https://github.com/user-attachments/assets/3e8d0a76-282d-4a9d-9726-a954cf80198a
 - [SLAM-Omni](https://aclanthology.org/2025.findings-acl.115/)（数据）
 - [SenseVoice](https://arxiv.org/abs/2407.04051)（组件）
 - [Mimi / Moshi](https://arxiv.org/abs/2410.00037)（组件）
+- [vLLM-Omni](https://github.com/vllm-project/vllm-omni)（推理、合成数据）
+- 其他参考的开源项目与论文（在技术报告中详细列出）
 
 ## 🫶支持者
 

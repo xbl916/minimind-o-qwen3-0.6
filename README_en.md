@@ -622,6 +622,8 @@ That said, the value of MiniMind-O lies exactly here. It compresses an entire Om
 - [SLAM-Omni](https://aclanthology.org/2025.findings-acl.115/) (data)
 - [SenseVoice](https://arxiv.org/abs/2407.04051) (component)
 - [Mimi / Moshi](https://arxiv.org/abs/2410.00037) (component)
+- [vLLM-Omni](https://github.com/vllm-project/vllm-omni) (inference, synthetic data)
+- Other referenced open-source projects and papers (full list in the technical report)
 
 ## 🫶 Supporters
 
