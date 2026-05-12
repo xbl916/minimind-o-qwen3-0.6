@@ -1,5 +1,7 @@
 > [!IMPORTANT]
 > **声明**：本项目基于 [https://github.com/jingyaogong/minimind-o](https://github.com/jingyaogong/minimind-o)，主要是将其基础模型从 [https://github.com/jingyaogong/minimind](https://github.com/jingyaogong/minimind) 替换成 Qwen3-0.6B。目的是验证训练可行性，仅验证了 full 训练，下方各种测试数据未做修改，仍为原项目数据。
+> 
+> **模型权重**：此项目训练后对应的权重已发布至 ModelScope：[https://www.modelscope.cn/models/xbl916/minimind-ominimind-o-qwen3-0.6-omni](https://www.modelscope.cn/models/xbl916/minimind-ominimind-o-qwen3-0.6-omni)
 
 <div align="center">
 

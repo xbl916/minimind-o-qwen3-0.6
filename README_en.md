@@ -1,5 +1,7 @@
 > [!IMPORTANT]
 > **DISCLAIMER**: This project is based on [https://github.com/jingyaogong/minimind-o](https://github.com/jingyaogong/minimind-o). The main modification is replacing its base model from [https://github.com/jingyaogong/minimind](https://github.com/jingyaogong/minimind) to Qwen3-0.6B. The purpose is to verify training feasibility. We have only verified the full training pipeline. The test data and metrics shown below have not been modified and still reflect the original project's data.
+> 
+> **Model Weights**: The trained weights for this project are available on ModelScope: [https://www.modelscope.cn/models/xbl916/minimind-ominimind-o-qwen3-0.6-omni](https://www.modelscope.cn/models/xbl916/minimind-ominimind-o-qwen3-0.6-omni)
 
 <div align="center">
 
