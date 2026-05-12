@@ -16,28 +16,30 @@ warnings.filterwarnings('ignore')
 
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
-    if 'model' in args.load_from:
-        moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model = MiniMindOmni(
-            OmniConfig(
-                hidden_size=args.hidden_size, 
-                num_hidden_layers=args.num_hidden_layers, 
-                use_moe=bool(args.use_moe)
-            ),
-            audio_encoder_path="./model/SenseVoiceSmall",
-            vision_model_path="./model/siglip2-base-p32-256-ve"
-        )
+    model = MiniMindOmni(
+        OmniConfig(
+            hidden_size=args.hidden_size, 
+            num_hidden_layers=args.num_hidden_layers, 
+            use_moe=bool(args.use_moe)
+        ),
+        audio_encoder_path=args.audio_encoder_path,
+        vision_model_path=args.vision_model_path,
+        llm_path=args.load_from
+    )
+    
+    moe_suffix = '_moe' if args.use_moe else ''
+    ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
+    if os.path.exists(ckp):
+        print(f"Loading finetuned weights from {ckp}")
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=False)
     else:
-        model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
-        model.audio_encoder, model.audio_processor = MiniMindOmni.load_sensevoice("./model/SenseVoiceSmall")
-        model.vision_encoder, model.vision_processor = MiniMindOmni.load_vision("./model/siglip2-base-p32-256-ve")
+        print(f"Finetuned weights {ckp} not found, using base model...")
+        
     log_model_params(model)
     if model.audio_encoder is not None: model.audio_encoder.to(args.device)
     if model.vision_encoder is not None: model.vision_encoder.to(args.device)
     model.mimi_model = MimiModel.from_pretrained("./model/mimi").eval()
-    return model.half().eval().to(args.device), tokenizer
+    return model.bfloat16().eval().to(args.device), tokenizer
 
 
 def eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, output_name, pixel_values=None, history=None, audio_lens=None, ref_codes=None, spk_emb=None):
@@ -89,11 +91,11 @@ def eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, output_name, 
 
 def main():
     parser = argparse.ArgumentParser(description="MiniMind-O Chat")
-    parser.add_argument('--load_from', default='model', type=str, help="模型加载路径（model=原生torch权重）")
+    parser.add_argument('--load_from', default='./model/Qwen3-0.6B', type=str, help="模型加载路径（model=原生torch权重）")
     parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录")
     parser.add_argument('--weight', default='sft_omni', type=str, help="权重名称前缀")
-    parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
-    parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
+    parser.add_argument('--hidden_size', default=1024, type=int, help="隐藏层维度")
+    parser.add_argument('--num_hidden_layers', default=28, type=int, help="隐藏层数量")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构")
     parser.add_argument('--max_new_tokens', default=512, type=int, help="最大生成长度")
     parser.add_argument('--temperature', default=0.7, type=float, help="Thinker生成温度")
@@ -102,6 +104,8 @@ def main():
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
     parser.add_argument('--audio_dir', default='./dataset/eval_omni/', type=str, help="测试音频目录")
     parser.add_argument('--image_dir', default='./dataset/eval_omni/', type=str, help="测试图像目录")
+    parser.add_argument('--audio_encoder_path', default='./model/SenseVoiceSmall', type=str, help="音频编码器路径")
+    parser.add_argument('--vision_model_path', default='./model/siglip2-base-p32-256-ve', type=str, help="视觉模型路径")
     parser.add_argument('--open_thinking', default=0, type=int, help="是否开启思考模式（0=否，1=是）（思考模式下禁用audio输出）")
     parser.add_argument('--decode_audio', default=1, type=int, help="是否解码音频输出（0=否，1=是）")
     parser.add_argument('--mode', default='0', type=str, help="评估模式：-1=all 0=text 1=multi 2=audio 3=clone 4=image 5=mix（逗号组合，如 2,5）")
@@ -198,7 +202,7 @@ def main():
             voice_data = torch.load(voices_pt, map_location=args.device)
             for speaker, v in sorted(voice_data.items()):
                 rc = v['ref_codes'].unsqueeze(0).to(args.device)
-                se = v['spk_emb'].half().unsqueeze(0).to(args.device) if 'spk_emb' in v else None
+                se = v['spk_emb'].bfloat16().unsqueeze(0).to(args.device) if 'spk_emb' in v else None
                 voices.append((speaker, rc, se))
         for speaker, rc, se in voices:
             info = f'ref_codes: {rc.shape[2]} frames, spk_emb: {"+" if se is not None else "-"}' if rc is not None else ('spk_emb only' if se is not None else 'default')

@@ -62,9 +62,9 @@ def log_model_params(model, ignore_patterns=['audio_encoder', 'vision_encoder'])
     else: Logger(f'Model Params: {total:.2f}M')
 
 
-def init_omni_model(omni_config, from_weight='full_sft', tokenizer_path='../model', audio_encoder_path='../model/SenseVoiceSmall', vision_model_path='../model/siglip2-base-p32-256-ve', save_dir='../out', device='cuda', freeze_backbone='none', from_resume=0):
+def init_omni_model(omni_config, from_weight='full_sft', tokenizer_path='../model/Qwen3-0.6B', audio_encoder_path='../model/SenseVoiceSmall', vision_model_path='../model/siglip2-base-p32-256-ve', save_dir='../out', device='cuda', freeze_backbone='none', from_resume=0):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    model = MiniMindOmni(omni_config, audio_encoder_path=audio_encoder_path, vision_model_path=vision_model_path)
+    model = MiniMindOmni(omni_config, audio_encoder_path=audio_encoder_path, vision_model_path=vision_model_path, llm_path=tokenizer_path)
     
     if from_weight != 'none':
         moe_suffix = '_moe' if omni_config.use_moe else ''

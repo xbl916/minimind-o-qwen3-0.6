@@ -43,7 +43,7 @@ def post_processing_chat(prompt_content, empty_think_ratio=0.2):
 
 class OmniDataset(Dataset):
     def __init__(self, data_path, tokenizer, audio_processor=None, vision_processor=None,
-                 max_length=1200, audio_special_token='<|audio_pad|>', image_special_token='<|image_pad|>',
+                 max_length=1200, audio_special_token='<|video_pad|>', image_special_token='<|image_pad|>',
                  audio_stop_token=2050,  # <|audio_stop|>
                  audio_pad_token=2049,  # <|audio_pad|>
                  audio_spk_token=2051,  # <|audio_spk|>
@@ -70,8 +70,9 @@ class OmniDataset(Dataset):
         self.image_token_id = tokenizer.encode(image_special_token, add_special_tokens=False)[0]
         self.audio_token_id = tokenizer.encode(audio_special_token, add_special_tokens=False)[0]
         self.think_end_ids = tokenizer.encode('</think>\n\n', add_special_tokens=False)
-        self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
-        self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids
+        # Qwen3 uses <|im_start|> and <|im_end|> instead of traditional bos/eos for chat roles
+        self.bos_id = tokenizer('<|im_start|>assistant\n', add_special_tokens=False).input_ids
+        self.eos_id = tokenizer('<|im_end|>\n', add_special_tokens=False).input_ids
 
     def __len__(self):
         return len(self.table)

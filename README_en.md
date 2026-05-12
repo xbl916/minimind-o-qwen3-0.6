@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> **DISCLAIMER**: This project is based on [https://github.com/jingyaogong/minimind-o](https://github.com/jingyaogong/minimind-o). The main modification is replacing its base model from [https://github.com/jingyaogong/minimind](https://github.com/jingyaogong/minimind) to Qwen3-0.6B. The purpose is to verify training feasibility. We have only verified the full training pipeline. The test data and metrics shown below have not been modified and still reflect the original project's data.
+
 <div align="center">
 
 ![logo](./images/logo.png)
@@ -28,7 +31,7 @@
 </div>
 
 * This project implements a small end-to-end Omni model from scratch, where a single set of weights jointly handles text / audio / image inputs and produces text / streaming-speech outputs.
-* `minimind-3o` has only ~0.1B parameters: it can be trained on a consumer GPU and runs quickly on CPU, making it one of the smallest fully-functional Omni implementations publicly available.
+* In this upgraded version, the language backbone has been swapped to **Qwen3-0.6B**. The overall `minimind-3o` model now has around **~0.7B** parameters (including Talker and projectors). It can still be efficiently fine-tuned on a standard consumer GPU.
 * Two training datasets are released, `mini` and `full`. `mini` runs the full pipeline in about 2 hours on a single RTX 3090 and is intended for getting started; `full` corresponds to the released weights.
 * The full codebase and technical report are released, covering the Thinker–Talker dual-path architecture, streaming speech generation, real-time barge-in, near-duplex interaction, voice cloning and a phone-mode WebUI.
 * All core algorithmic components are implemented from scratch in native PyTorch and do not rely on high-level abstractions from third-party frameworks.
@@ -56,7 +59,7 @@ After [MiniMind](https://github.com/jingyaogong/minimind) (LLM) and [MiniMind-V]
 
 GPT-4o was probably the first system that made natural streaming voice interaction feel real. Since then, open-source projects such as Mini-Omni2, Moshi, GLM-4-Voice and Qwen3-Omni have gradually appeared. However, if the goal is not just to call ready-made checkpoints with billions of parameters, but to fully understand, train and modify a complete Omni model from scratch, the open-source community still lacks a sufficiently lightweight starting point with an end-to-end pipeline. A common way to bring speech into an Omni model is to chain ASR, LLM and TTS into a cascade: speech is first transcribed to text, the LLM processes it, and the answer is then synthesized back to speech. This is straightforward from an engineering perspective, but it adds an extra transcription step and noticeably hurts latency, prosody and emotional cues.
 
-MiniMind-O attempts to fill this gap: speech and text are connected directly at the hidden-state level, while the trainable backbone remains only ~0.1B parameters and the end-to-end Omni pipeline is preserved. The Talker side adopts MTP (Multi-Token Prediction) to predict multiple Mimi codebook layers at once, and combines it with VAD to support real-time barge-in and near-duplex interaction—a practical engineering route for a tiny Omni model. The code, model weights, training data and technical report are all open-sourced. A single RTX 3090 can finish training on the mini dataset in about 2 hours. The goal remains the same: let everyone read the project from the first line of code, and train, from scratch, a model that can listen, see, think and speak:
+MiniMind-O attempts to fill this gap: speech and text are connected directly at the hidden-state level, while the trainable backbone has been upgraded to Qwen3-0.6B, preserving the complete end-to-end Omni pipeline. The Talker side adopts MTP (Multi-Token Prediction) to predict multiple Mimi codebook layers at once, and combines it with VAD to support real-time barge-in and near-duplex interaction—a practical engineering route for a tiny Omni model. The code, model weights, training data and technical report are all open-sourced. A single RTX 3090 can finish training on the mini dataset in about 2 hours. The goal remains the same: let everyone read the project from the first line of code, and train, from scratch, a model that can listen, see, think and speak:
 
 ![](images/omni_io_flow.png)
 
@@ -78,7 +81,7 @@ MiniMind-O attempts to fill this gap: speech and text are connected directly at 
 
 | Model | Backbone params | Release |
 |---|---|---|
-| minimind-3o | ~0.1B | 2026.05.05 |
+| minimind-3o (Qwen3 Edition) | ~0.7B | 2026.05.12 |
 | minimind-3o-moe | ~0.3B-A0.1B | 2026.05.05 |
 
 ---
@@ -135,8 +138,8 @@ modelscope download --model gongjy/siglip2-base-p32-256-ve --local_dir ./model/s
 modelscope download --model gongjy/mimi --local_dir ./model/mimi
 # Download CAM++ speaker encoder to ./model/campplus
 modelscope download --model gongjy/campplus --local_dir ./model/campplus
-# Download MiniMind LLM weights to ./out (used as the language backbone for training Omni)
-modelscope download --model gongjy/minimind-3o-pytorch llm_768.pth --local_dir ./out
+# Download Qwen3-0.6B LLM weights to ./model/Qwen3-0.6B (used as the base language backbone for training Omni)
+modelscope download --model Qwen/Qwen3-0.6B --local_dir ./model/Qwen3-0.6B
 ```
 
 You can also `git clone` the corresponding repos from the [ModelScope Collection](https://modelscope.cn/collections/gongjy/MiniMind-O) or [HuggingFace Collection](https://huggingface.co/collections/jingyaogong/minimind-o) (LFS required); details omitted here.
@@ -178,15 +181,25 @@ git clone https://huggingface.co/jingyaogong/minimind-3o
 python eval_omni.py --load_from minimind-3o
 ```
 
-### 3' Launch WebUI (optional)
+### 3' Convert Model Weights and Tokenizer
+
+After training with Qwen3-0.6B, you must run the conversion script to export the PyTorch model to Transformers format. This step will correctly copy the Qwen3 Tokenizer into the `minimind-3o` directory:
 
 ```bash
-# ⚠️ Copy the Transformers-format model folder into ./scripts/. The web_demo_omni script
-#    automatically scans this directory for sub-folders that contain weight files; it
-#    raises an error if none is found.
-cp -r minimind-3o ./scripts/minimind-3o
+python scripts/convert_omni.py
+```
+
+### 4' Launch WebUI (with Deep Qwen3 Integration)
+
+```bash
+# Launch main WebUI
+cd webui && python web_demo.py
+
+# Or use the fallback script:
 cd scripts && python web_demo_omni.py
 ```
+> **Note**: Because Qwen3 models typically have a strong tendency to output `<think>` tags (which blocks streaming audio generation), our inference scripts have been deeply adapted. They natively inject the `/no_think` instruction into the system prompt and forcibly enable the `open_thinking=True` hook to bypass the thinking phase seamlessly. This guarantees real-time, fluid speech outputs. In addition, all inference runs smoothly in `bfloat16` precision.
+
 
 ## Ⅱ 🛠️ Training
 
@@ -211,7 +224,7 @@ For a quick start, downloading only the `_mini` parquet files from the [dataset 
 The recommended mini training pipeline is shown below. It is meant to be run from the `trainer/` directory; equivalently, run `cd trainer && bash train.sh`:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_wandb --use_moe 0
+CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 8 --use_compile 1 --from_weight ../model/Qwen3-0.6B --save_weight sft_zero --max_seq_len 512 --use_wandb --use_moe 0
 CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_wandb --use_moe 0
 CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 16 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_wandb --use_moe 0
 ```
@@ -226,7 +239,7 @@ python eval_omni.py --weight sft_omni
 
 # 📌 Model Details
 
-The language backbone of MiniMind-O comes from the sister project [MiniMind](https://github.com/jingyaogong/minimind). For LLM architecture and training details, please refer to that repository. Even without going into the LLM internals, you can still follow the Quick Start section above to train MiniMind-O end-to-end.
+The language backbone of this upgraded MiniMind-O has been swapped to the powerful [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B). Even without going into the LLM internals, you can still follow the Quick Start section above to train MiniMind-O end-to-end.
 
 ## Ⅰ Architecture overview
 

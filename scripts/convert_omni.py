@@ -16,7 +16,7 @@ warnings.filterwarnings('ignore', category=UserWarning)
 def convert_torch2transformers(torch_path, transformers_path, lm_config, dtype=torch.bfloat16):
     OmniConfig.register_for_auto_class()
     MiniMindOmni.register_for_auto_class("AutoModelForCausalLM")
-    model = MiniMindOmni(lm_config, audio_encoder_path="../model/SenseVoiceSmall", vision_model_path="../model/siglip2-base-p32-256-ve")
+    model = MiniMindOmni(lm_config, audio_encoder_path="../model/SenseVoiceSmall", vision_model_path="../model/siglip2-base-p32-256-ve", llm_path="../model/Qwen3-0.6B")
     state_dict = torch.load(torch_path, map_location='cpu')
     model.load_state_dict(state_dict, strict=False)
     model = model.to(dtype)
@@ -25,7 +25,7 @@ def convert_torch2transformers(torch_path, transformers_path, lm_config, dtype=t
     del model.audio_encoder
     del model.vision_encoder
     model.save_pretrained(transformers_path, safe_serialization=False)
-    tokenizer = AutoTokenizer.from_pretrained('../model/')
+    tokenizer = AutoTokenizer.from_pretrained('../model/Qwen3-0.6B')
     tokenizer.save_pretrained(transformers_path)
     config_path = os.path.join(transformers_path, "config.json")
     config = json.load(open(config_path, 'r', encoding='utf-8'))
@@ -45,7 +45,7 @@ def convert_transformers2torch(transformers_path, torch_path):
 
 
 if __name__ == '__main__':
-    lm_config = OmniConfig(hidden_size=768, num_hidden_layers=8, use_moe=False)
+    lm_config = OmniConfig(hidden_size=1024, num_hidden_layers=8, use_moe=False)
     torch_path = f"../out/sft_omni_{lm_config.hidden_size}{'_moe' if lm_config.use_moe else ''}.pth"
     transformers_path = '../minimind-3o'
     convert_torch2transformers(torch_path, transformers_path, lm_config)

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from torch import nn
 from torch.nn import functional as F
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
-from transformers import SiglipImageProcessor, SiglipVisionModel, logging as hf_logging
+from transformers import SiglipImageProcessor, SiglipVisionModel, logging as hf_logging, AutoModelForCausalLM
 from .model_minimind import *
 
 
@@ -13,16 +13,16 @@ class OmniConfig(MiniMindConfig):
         super().__init__(**kwargs)
         self.num_talker_hidden_layers = kwargs.get("num_talker_hidden_layers", 4)
         self.talker_hidden_size = kwargs.get("talker_hidden_size", 768)
-        self.audio_ids = kwargs.get("audio_ids", [16]) # "<|audio_pad|>" token id
-        self.audio_special_token = kwargs.get("audio_special_token", "<|audio_pad|>")
+        self.audio_ids = kwargs.get("audio_ids", [151656]) # "<|video_pad|>" token id
+        self.audio_special_token = kwargs.get("audio_special_token", "<|video_pad|>")
         self.audio_hidden_size = kwargs.get("audio_hidden_size", 512)
         self.audio_vocab_size = kwargs.get("audio_vocab_size", 2112)
         self.audio_pad_token = kwargs.get("audio_pad_token", 2049)
         self.audio_stop_token = kwargs.get("audio_stop_token", 2050)
         self.audio_spk_token = kwargs.get("audio_spk_token", 2051)
         self.spk_emb_size = kwargs.get("spk_emb_size", 192)
-        self.think_end_ids = kwargs.get("think_end_ids", [26, 234, 234]) # </think>\n\n
-        self.image_ids = kwargs.get("image_ids", [12]) # "<|image_pad|>" token id
+        self.think_end_ids = kwargs.get("think_end_ids", [151668]) # </think>
+        self.image_ids = kwargs.get("image_ids", [151655]) # "<|image_pad|>" token id
         self.image_special_token = kwargs.get("image_special_token", "<|image_pad|>")
         self.image_hidden_size = kwargs.get("image_hidden_size", 768)
         self.image_token_len = kwargs.get("image_token_len", 64)
@@ -102,13 +102,21 @@ class TalkerModule(nn.Module):
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
 
-class MiniMindOmni(MiniMindForCausalLM):
+class MiniMindOmni(PreTrainedModel):
     config_class = OmniConfig
-    def __init__(self, config: OmniConfig = None, audio_encoder_path="./model/SenseVoiceSmall", vision_model_path="./model/siglip2-base-p32-256-ve"):
+    def __init__(self, config: OmniConfig = None, audio_encoder_path="./model/SenseVoiceSmall", vision_model_path="./model/siglip2-base-p32-256-ve", llm_path="./model/Qwen3-0.6B"):
         config = config or OmniConfig()
         super().__init__(config)
-        object.__setattr__(self, 'thinker', self.model)  # alias: self.thinker == self.model
-        object.__setattr__(self.model, 'lm_head', self.lm_head)  # alias: self.thinker.lm_head == self.lm_head
+        self.config = config
+        
+        self.qwen = AutoModelForCausalLM.from_pretrained(llm_path, trust_remote_code=True)
+        self.thinker = self.qwen.model
+        self.lm_head = self.qwen.lm_head
+        
+        self.config.hidden_size = self.qwen.config.hidden_size
+        self.config.num_hidden_layers = self.qwen.config.num_hidden_layers
+        self.config.bridge_layer = self.qwen.config.num_hidden_layers // 2 - 1
+        
         self.talker = TalkerModule(config)
         self.audio_proj = MMAudioProjector(config.audio_hidden_size, config.hidden_size)
         self.vision_proj = MMVisionProjector(config.image_hidden_size, config.hidden_size, target_tokens=config.image_token_len)
@@ -250,28 +258,30 @@ class MiniMindOmni(MiniMindForCausalLM):
         else:
             batch_size, _, seq_length = input_ids.shape
             text_ids, audio_ids = input_ids[:, 8, :], input_ids[:, :8, :]
-        if hasattr(past_key_values, 'layers'): past_key_values = None
-        n_thinker, n_talker = len(self.thinker.layers), len(self.talker.layers)
-        past_key_values = past_key_values or ([None] * (n_thinker + n_talker))
-        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
-        # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
-        if self.thinker.freqs_cos[0, 0] == 0:
-            freqs_cos, freqs_sin = precompute_freqs_cis(dim=self.config.head_dim, end=self.config.max_position_embeddings, rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling)
-            self.thinker.freqs_cos, self.thinker.freqs_sin = freqs_cos.to(input_ids.device), freqs_sin.to(input_ids.device)
+        
+        n_talker = len(self.talker.layers)
+        
+        if past_key_values is None:
+            thinker_kv = None
+            talker_kvs = [None] * n_talker
+            start_pos = 0
+        else:
+            thinker_kv = past_key_values[0]
+            talker_kvs = past_key_values[1:]
+            start_pos = talker_kvs[0][0].shape[1] if talker_kvs[0] is not None else 0
+
         if self.talker.freqs_cos[0, 0] == 0:
             freqs_cos, freqs_sin = precompute_freqs_cis(dim=self.talker.talker_config.head_dim, end=self.config.max_position_embeddings, rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling)
             self.talker.freqs_cos, self.talker.freqs_sin = freqs_cos.to(input_ids.device), freqs_sin.to(input_ids.device)
-        presents = []
 
         # ======= Thinker: text-only input, output text logits =======
-        hidden_states = self.thinker.dropout(self.thinker.embed_tokens(text_ids))
-        position_embeddings = (self.thinker.freqs_cos[start_pos:start_pos + seq_length], self.thinker.freqs_sin[start_pos:start_pos + seq_length])
+        inputs_embeds = self.thinker.embed_tokens(text_ids)
         if audio_inputs is not None and start_pos == 0:
             audio_features = self.encode_audio_inputs(audio_inputs, audio_lens)
-            hidden_states = self.inject_audio_features(text_ids, hidden_states, audio_features, seq_length)
+            inputs_embeds = self.inject_audio_features(text_ids, inputs_embeds, audio_features, seq_length)
         if pixel_values is not None and start_pos == 0:
             if hasattr(pixel_values, 'keys'):
-                img_emb = self.get_image_embeddings(pixel_values).to(hidden_states.dtype)
+                img_emb = self.get_image_embeddings(pixel_values).to(inputs_embeds.dtype)
                 vision_tensors = self.vision_proj(img_emb)
             else:
                 if len(pixel_values.shape) == 6:
@@ -284,13 +294,18 @@ class MiniMindOmni(MiniMindForCausalLM):
                     self.encode_image_inputs(pixel_values[:, i, :, :, :])
                     for i in range(num)
                 ], dim=stack_dim)
-            hidden_states = self.count_vision_proj(tokens=text_ids, h=hidden_states, vision_tensors=vision_tensors, seqlen=seq_length)
-        bridge_states = hidden_states
-        for i, (layer, past_key_value) in enumerate(zip(self.thinker.layers, past_key_values[:n_thinker])):
-            hidden_states, present = layer(hidden_states, position_embeddings, past_key_value=past_key_value, use_cache=use_cache, attention_mask=attention_mask)
-            presents.append(present)
-            if i == self.config.bridge_layer: bridge_states = hidden_states
-        h_thinker = self.thinker.norm(hidden_states)
+            inputs_embeds = self.count_vision_proj(tokens=text_ids, h=inputs_embeds, vision_tensors=vision_tensors, seqlen=seq_length)
+        
+        outputs = self.thinker(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=thinker_kv,
+            use_cache=use_cache,
+            output_hidden_states=True
+        )
+        h_thinker = outputs.last_hidden_state
+        bridge_states = outputs.hidden_states[self.config.bridge_layer + 1]
+        presents = [outputs.past_key_values] if outputs.past_key_values is not None else []
 
         # ======= Talker: thinker hidden + audio codes, output audio logits =======
         talker_emb = self.talker.embed_tokens(audio_ids)
@@ -300,23 +315,24 @@ class MiniMindOmni(MiniMindForCausalLM):
             talker_emb = torch.where(spk_mask, self.talker.spk_proj(spk_emb).unsqueeze(1), talker_emb)
         hidden_states = self.talker.embed_proj(bridge_states) * self.talker.text_scale + self.talker.codec_proj(talker_emb) * self.talker.audio_scale
         talker_pos_emb = (self.talker.freqs_cos[start_pos:start_pos + seq_length], self.talker.freqs_sin[start_pos:start_pos + seq_length])
-        for layer, past_key_value in zip(self.talker.layers, past_key_values[n_thinker:]):
+        for layer, past_key_value in zip(self.talker.layers, talker_kvs):
             hidden_states, present = layer(hidden_states, talker_pos_emb, past_key_value=past_key_value, use_cache=use_cache, attention_mask=attention_mask)
-            presents.append(present)
+            if use_cache:
+                presents.append(present)
         h_talker = self.talker.norm(hidden_states)
 
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        aux_loss = sum(l.mlp.aux_loss for l in list(self.thinker.layers) + list(self.talker.layers) if isinstance(l.mlp, MOEFeedForward))
+        aux_loss = sum(l.mlp.aux_loss for l in list(self.talker.layers) if isinstance(l.mlp, MOEFeedForward))
         aux_loss += sum(p.sum() for p in self.audio_proj.parameters()) * 0 + sum(p.sum() for p in self.vision_proj.parameters()) * 0 + sum(p.sum() for p in self.talker.lm_head.adapters.parameters()) * 0 + sum(p.sum() for p in self.talker.spk_proj.parameters()) * 0 # dummy gradient
-        text_logits = self.thinker.lm_head(h_thinker[:, slice_indices, :])
+        text_logits = self.lm_head(h_thinker[:, slice_indices, :])
         audio_logits = self.talker.lm_head(h_talker[:, slice_indices, :])
         
-        out = MoeCausalLMOutputWithPast(aux_loss=aux_loss, logits=text_logits, past_key_values=presents)
+        out = MoeCausalLMOutputWithPast(aux_loss=aux_loss, logits=text_logits, past_key_values=presents if use_cache else None)
         out.audio_logits = audio_logits
         return out
 
     @torch.inference_mode()
-    def generate(self, input_ids, eos_token_id=2, max_new_tokens=1024, temperature=0.75, top_p=0.90,
+    def generate(self, input_ids, eos_token_id=151645, max_new_tokens=1024, temperature=0.75, top_p=0.90,
                  stream=False, rp=1., use_cache=True, return_audio_codes=False, **args):
         if stream:
             return self.stream_generate(input_ids, eos_token_id, max_new_tokens, temperature, top_p, rp, use_cache, return_audio_codes, **args)

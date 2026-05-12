@@ -62,15 +62,18 @@ def prep_image(b64):
 def build_ids(prompt, history):
     tok, dev, n = M['tokenizer'], M['device'], M['cfg'].max_history_turns
     hist = history[-n:] if n > 0 else []
-    msgs = hist + [{"role": "user", "content": prompt}]
-    t = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    sys_msg = [{"role": "system", "content": "/no_think  你是一个人工智能助手，名字叫小可"}]
+    msgs = sys_msg + hist + [{"role": "user", "content": prompt}]
+    t = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, open_thinking=False)
+    # Bypass thinking phase by injecting an empty think block
+    t += "<think>\n</think>\n"
     return torch.tensor(tok(t).data['input_ids'], dtype=torch.long, device=dev)[None, ...]
 
 def _mimi_decode(frames):
     codes = [f for f in frames if f and len(f) == 8]
     if not codes or not M['mimi']: return None
     mc = torch.tensor(codes, dtype=torch.long).T.unsqueeze(0)
-    mc = torch.where(mc >= 2049, torch.zeros_like(mc), mc)
+    mc = torch.where(mc >= 2049, torch.zeros_like(mc), mc).to(M['device'])
     with torch.no_grad():
         au = M['mimi'].decode(mc).audio_values.squeeze().cpu().numpy()
     return au, mc.shape[-1]
@@ -102,7 +105,7 @@ def voice_args(name):
         v = V[name]
         dev = M['device']
         rc = v['ref_codes'].unsqueeze(0).to(dev)
-        se = v['spk_emb'].half().unsqueeze(0).to(dev) if 'spk_emb' in v else None
+        se = v['spk_emb'].bfloat16().unsqueeze(0).to(dev) if 'spk_emb' in v else None
         return {'ref_codes': rc, 'spk_emb': se}
     return {}
 
@@ -202,14 +205,14 @@ def load_main_model(model_path, model_name):
         M.pop('model', None); M.pop('tokenizer', None)
         if torch.cuda.is_available(): torch.cuda.empty_cache()
         tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        m = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+        m = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, llm_path="../model/Qwen3-0.6B", audio_encoder_path="", vision_model_path="")
         vision_encoder, vision_processor = MiniMindOmni.load_vision('../model/siglip2-base-p32-256-ve')
         audio_encoder, audio_processor = MiniMindOmni.load_sensevoice('../model/SenseVoiceSmall')
         object.__setattr__(m, 'vision_encoder', vision_encoder)
         object.__setattr__(m, 'vision_processor', vision_processor)
         object.__setattr__(m, 'audio_encoder', audio_encoder)
         object.__setattr__(m, 'audio_processor', audio_processor)
-        m = m.half().eval().to(M['device'])
+        m = m.bfloat16().eval().to(M['device'])
         if m.audio_encoder: m.audio_encoder.to(M['device'])
         if m.vision_encoder: m.vision_encoder.to(M['device'])
         M['tokenizer'], M['model'], M['model_name'] = tok, m, model_name
@@ -236,7 +239,11 @@ def prepare_turn(text, samples, image_b64, do_asr_for_image):
     if image_b64:
         pixel_values = prep_image(image_b64)
         m = M['model']
-        prompt = (prompt + "\n\n" if prompt else "") + "请描述这张图片\n\n" + m.config.image_special_token * m.config.image_token_len
+        if not prompt:
+            prompt = "请描述这张图片\n\n"
+        else:
+            prompt = prompt + "\n\n"
+        prompt += m.config.image_special_token * m.config.image_token_len
     return audio_inputs, audio_lens, pixel_values, prompt, user_text, asr_thread, asr_result
 
 # -------- routes --------
@@ -486,7 +493,7 @@ def init_model(args):
         au = torch.full((1, 8, 3), 2049, dtype=torch.long, device=args.device)
         M['model'].forward(torch.cat((au, ids.unsqueeze(1)), dim=1))
         if M['model'].audio_encoder: M['model'].audio_encoder(torch.zeros(1, 100, 560, device=args.device), torch.tensor([100], device=args.device))
-        if M['mimi']: M['mimi'].decode(torch.zeros(1, 8, 1, dtype=torch.long))
+        if M['mimi']: M['mimi'].decode(torch.zeros(1, 8, 1, dtype=torch.long, device=args.device))
     print('Warmup done!')
 
 
@@ -497,7 +504,7 @@ if __name__ == '__main__':
     p.add_argument('--port', default=7860, type=int, help='WebUI 服务端口；端口被占用或需要同时启动多个实例时调整。')
     p.add_argument('--audio_chunk_frames', default=4, type=int, help='流式播放每次解码的 Mimi frame 数；默认 4 约 320ms。WebUI 播放卡顿时可调大到 8/12，低延迟优先时保持 4。')
     p.add_argument('--audio_overlap', default=2, type=int, help='分块 Mimi 解码的重叠帧数；默认 2 用于缓解块边界断裂。一般不需要调整，边界杂音明显时可适当增大。')
-    p.add_argument('--max_history_turns', default=0, type=int, help='对话历史轮数；默认 0 不带历史以降低延迟和显存。需要多轮上下文时调大，但会增加 prefill 成本。')
+    p.add_argument('--max_history_turns', default=5, type=int, help='对话历史轮数；默认 0 不带历史以降低延迟和显存。需要多轮上下文时调大，但会增加 prefill 成本。')
     args = p.parse_args()
     init_model(args)
     app.run(host='0.0.0.0', port=args.port, threaded=True)

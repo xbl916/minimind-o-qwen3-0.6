@@ -72,14 +72,14 @@ def load_hf_model(model_path):
     with model_lock:
         [sys.modules.pop(k) for k in list(sys.modules) if 'transformers_modules' in k]
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, llm_path="../model/Qwen3-0.6B", audio_encoder_path="", vision_model_path="")
         vision_encoder, vision_processor = MiniMindOmni.load_vision(args.vision_model)
         audio_encoder, audio_processor = MiniMindOmni.load_sensevoice(args.audio_encoder)
         object.__setattr__(model, 'vision_encoder', vision_encoder)
         object.__setattr__(model, 'vision_processor', vision_processor)
         object.__setattr__(model, 'audio_encoder', audio_encoder)
         object.__setattr__(model, 'audio_processor', audio_processor)
-        model = model.half().eval().to(device)
+        model = model.bfloat16().eval().to(device)
         if model.audio_encoder:
             model.audio_encoder.to(device)
         if model.vision_encoder:
@@ -140,11 +140,12 @@ def chat_stream(prompt, audio_input=None, image_input=None, voice_name="default"
     if voice_name != "default" and voice_name in voices_data:
         v = voices_data[voice_name]
         ref_codes = v['ref_codes'].unsqueeze(0).to(device)
-        spk_emb = v['spk_emb'].half().unsqueeze(0).to(device) if 'spk_emb' in v else None
+        spk_emb = v['spk_emb'].bfloat16().unsqueeze(0).to(device) if 'spk_emb' in v else None
 
-    messages = (history or []) + [{"role": "user", "content": prompt}]
-    open_thinking = bool(args.open_thinking)
-    inputs_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, open_thinking=open_thinking)
+    sys_msg = [{"role": "system", "content": "You are a helpful assistant. /no_think"}]
+    messages = sys_msg + (history or []) + [{"role": "user", "content": prompt}]
+    inputs_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, open_thinking=False)
+    inputs_text += "<think>\n</think>\n"
     x = torch.tensor(tokenizer(inputs_text).data['input_ids'], dtype=torch.long, device=device)[None, ...]
 
     audio_frames = []
@@ -152,7 +153,7 @@ def chat_stream(prompt, audio_input=None, image_input=None, voice_name="default"
         with model_lock:
             res = model.generate(x, tokenizer.eos_token_id, max_new_tokens=max_tokens,
                                  temperature=temperature, top_p=args.top_p, stream=True,
-                                 return_audio_codes=True, open_thinking=open_thinking,
+                                 return_audio_codes=True, open_thinking=False,
                                  audio_inputs=audio_inputs, audio_lens=audio_lens, pixel_values=pixel_values,
                                  ref_codes=ref_codes, spk_emb=spk_emb)
             history_idx = 0
@@ -160,7 +161,7 @@ def chat_stream(prompt, audio_input=None, image_input=None, voice_name="default"
                 text_chunk = None
                 if y is not None:
                     answer = tokenizer.decode(y[0].tolist(), skip_special_tokens=True)
-                    if answer and answer[-1] != '�' and len(answer) > history_idx:
+                    if answer and answer[-1] != '' and len(answer) > history_idx:
                         text_chunk = answer[history_idx:]
                         history_idx = len(answer)
                 if audio_frame:
