@@ -31,28 +31,32 @@ class OmniConfig(MiniMindConfig):
 class MMAudioProjector(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
+        self.input_norm = nn.LayerNorm(in_dim)
+        self.linear = nn.Linear(in_dim, out_dim)
         self.mlp = nn.Sequential(
-            nn.LayerNorm(in_dim),
-            nn.Linear(in_dim, out_dim),
+            nn.Linear(out_dim, 2 * out_dim),
             nn.GELU(),
-            nn.Linear(out_dim, out_dim),
+            nn.Linear(2 * out_dim, out_dim, bias=False),
         )
     def forward(self, x):
-        return self.mlp(x)
-
+        x = self.linear(self.input_norm(x))
+        x = x + self.mlp(x)
+        return x
 
 class MMVisionProjector(nn.Module):
     def __init__(self, in_dim, out_dim, source_tokens=64, target_tokens=64):
         super().__init__()
+        self.input_norm = nn.LayerNorm(in_dim)
+        self.linear = nn.Linear(in_dim, out_dim)
         self.mlp = nn.Sequential(
-            nn.LayerNorm(in_dim),
-            nn.Linear(in_dim, out_dim),
+            nn.Linear(out_dim, 2 * out_dim),
             nn.GELU(),
-            nn.Linear(out_dim, out_dim),
+            nn.Linear(2 * out_dim, out_dim, bias=False),
         )
     def forward(self, x):
-        return self.mlp(x)
-
+        x = self.linear(self.input_norm(x))
+        x = x + self.mlp(x)
+        return x
 
 class TalkerHead(nn.Module):
     def __init__(self, in_features, out_features, num_layers=8, rank=256):
@@ -154,6 +158,9 @@ class MiniMindOmni(PreTrainedModel):
             valid_lens = torch.tensor([valid_fbank.size(1)] * valid_fbank.size(0), device=valid_fbank.device)
         with torch.no_grad():
             emb, _ = self.audio_encoder(valid_fbank, valid_lens)
+            
+        # [Audio LAST-ViT] 使用频域注意力机制抑制环境噪音/静音帧
+        emb = self.apply_last_vit(emb, is_audio=True)
         proj_dtype = next(self.audio_proj.parameters()).dtype
         emb_list = [self.audio_proj(emb[i, :max(1, min(valid_lens[i].item(), emb.size(1)))].unsqueeze(0).to(proj_dtype)).squeeze(0) for i in range(emb.size(0))]
         if batch_mask.all(): return emb_list
@@ -204,16 +211,60 @@ class MiniMindOmni(PreTrainedModel):
         return model.eval(), processor
 
     @torch.compiler.disable
+    def apply_last_vit(self, x, is_audio=False):
+        """
+        LAST-ViT frequency-domain token selection mechanism
+        x: [B, N, D]
+        """
+        orig_dtype = x.dtype
+        x = x.float()
+        x_detach = x.clone()
+        x_fft = torch.fft.fft(x, dim=-1)
+        kernel_size = x.shape[-1]
+        
+        # 区分 audio 和 vision 的 sigma 配置
+        if is_audio:
+            sigma = getattr(self.config, 'last_vit_audio_sigma', 2.0)
+        else:
+            sigma = getattr(self.config, 'last_vit_sigma', 2.0)
+        
+        # 1D Gaussian kernel
+        idx = torch.arange(kernel_size, dtype=torch.float32, device=x.device) - kernel_size // 2
+        gs_k = torch.exp(-(idx**2) / (2 * sigma**2))
+        gs_k = gs_k / gs_k.sum()
+        
+        x_fft = torch.fft.fftshift(x_fft, dim=-1)
+        x_fft = x_fft * gs_k
+        x_fft = torch.fft.ifftshift(x_fft, dim=-1)
+        x_ifft = torch.fft.ifft(x_fft, dim=-1).real
+        
+        diff = x_detach / (torch.abs(x_ifft - x_detach) + 1e-6)
+        
+        # 修正：之前直接对 diff 做 sigmoid，因为 diff 的符号与 x_detach 完全一致且绝对值极大，
+        # 会导致 weight 变成 0 或 1，相当于做了一个 ReLU，抹杀了所有负值特征，丢失了 50% 的信息！
+        # 现在的做法：计算每个 Patch 在所有通道上的平均 Diff 得分，作为一个全局重要性系数 [B, N, 1]
+        patch_score = diff.mean(dim=-1, keepdim=True)
+        
+        # 将得分在空间维度标准化，避免极值，再通过 sigmoid 映射到 0~1 的平滑权重
+        patch_score = (patch_score - patch_score.mean(dim=1, keepdim=True)) / (patch_score.std(dim=1, keepdim=True) + 1e-5)
+        weight = torch.sigmoid(patch_score)
+        
+        # 用平滑权重调节原始特征，这样既抑制了背景，又完美保留了特征向量的方向和正负号！
+        sel_p = x_detach * weight
+            
+        return sel_p.to(orig_dtype)
+
+    @torch.compiler.disable
     def get_image_embeddings(self, image_inputs):
         if hasattr(image_inputs, 'keys'):
             image_inputs = {k: v.squeeze(1) if v.ndim > 2 and v.shape[1] == 1 else v for k, v in image_inputs.items()}
             pixel_attention_mask = image_inputs.get('pixel_attention_mask')
             if pixel_attention_mask is not None and not pixel_attention_mask.any():
                 pv = image_inputs['pixel_values']
-                return pv.new_zeros(pv.size(0), pv.size(1), self.config.image_hidden_size)
+                return pv.new_zeros(pv.size(0), self.config.image_token_len, self.config.image_hidden_size)
         with torch.no_grad():
             outputs = self.vision_encoder(**image_inputs)
-        return outputs.last_hidden_state
+        return self.apply_last_vit(outputs.last_hidden_state, is_audio=False)
 
     @torch.compiler.disable
     def encode_image_inputs(self, pixel_values):
@@ -221,6 +272,7 @@ class MiniMindOmni(PreTrainedModel):
         mask = pixel_values.flatten(1).any(1)
         if not mask.any(): return pixel_values.new_zeros(pixel_values.size(0), self.config.image_token_len, self.config.hidden_size)
         with torch.no_grad(): emb = self.vision_encoder(pixel_values=pixel_values[mask]).last_hidden_state
+        emb = self.apply_last_vit(emb, is_audio=False)
         if emb.dim() == 2: emb = emb.unsqueeze(0)
         emb = self.vision_proj(emb)
         if mask.all(): return emb
